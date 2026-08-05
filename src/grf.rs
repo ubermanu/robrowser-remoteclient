@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     path::Path,
@@ -9,6 +10,7 @@ pub struct Archive {
     pub version: u32,
     pub real_file_count: u64,
     table: Vec<u8>,
+    index: HashMap<Vec<u8>, u32>,
 }
 
 #[derive(Debug)]
@@ -144,11 +146,39 @@ impl Archive {
             ));
         }
 
-        Ok(Archive {
+        let mut archive = Archive {
             table,
             version,
             real_file_count,
-        })
+            index: HashMap::new(),
+        };
+
+        archive.build_index();
+
+        Ok(archive)
+    }
+
+    fn build_index(&mut self) {
+        let mut index = HashMap::with_capacity(self.real_file_count as usize);
+        let mut at = 0usize;
+
+        let t = Instant::now();
+
+        while let Some(entry) = self.entry_at(at) {
+            index.insert(normalize(entry.name), at as u32);
+            at += entry.name.len() + 1 + self.meta_len();
+        }
+
+        println!("index built in {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
+        println!("index size: {}", index.len());
+        println!("rss: {} MB", rss_kb().unwrap_or(0) / 1024);
+
+        self.index = index;
+    }
+
+    pub fn lookup(&self, path: &[u8]) -> Option<Entry<'_>> {
+        let at = *self.index.get(normalize(path).as_slice())?;
+        self.entry_at(at as usize)
     }
 
     pub fn entry_at(&self, at: usize) -> Option<Entry<'_>> {
@@ -196,5 +226,38 @@ impl Archive {
         );
 
         count
+    }
+}
+
+fn rss_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find(|line| line.starts_with("VmRSS:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+fn normalize(name: &[u8]) -> Vec<u8> {
+    name.iter()
+        .map(|&b| {
+            if b == b'\\' {
+                b'/'
+            } else {
+                b.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lowercase_and_flips_separators() {
+        assert_eq!(normalize(br"DATA\Texture\FOO.BMP"), b"data/texture/foo.bmp");
     }
 }

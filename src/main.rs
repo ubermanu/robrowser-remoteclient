@@ -30,5 +30,7 @@ fn main() -> io::Result<()> {
 
     println!("entries found: {count}");
 
+    println!("{:?}", archive.lookup(b"data/06guild_r.gat"));
+
     Ok(())
 }
