@@ -1,4 +1,4 @@
-use crate::client::Client;
+use crate::state::Shared;
 use axum::{
     Router,
     body::Body,
@@ -15,7 +15,7 @@ use tower_http::cors::{Any, CorsLayer};
 const CACHE_POLICY: &str = "public, max-age=3600";
 
 pub async fn serve(
-    client: Arc<Client>,
+    shared: Arc<Shared>,
     bind: SocketAddr,
     cors: bool,
     search: bool,
@@ -26,7 +26,7 @@ pub async fn serve(
         router = router.route("/", post(search_handler).fallback(handler));
     }
 
-    let mut app = router.fallback(handler).with_state(client);
+    let mut app = router.fallback(handler).with_state(shared);
 
     if cors {
         let mut methods = vec![Method::GET, Method::HEAD];
@@ -53,7 +53,7 @@ pub async fn serve(
 
 /// `POST /` with a `filter=<regex>` body: run the regex over every file name
 /// and answer with the matches, one per line.
-async fn search_handler(State(client): State<Arc<Client>>, body: String) -> impl IntoResponse {
+async fn search_handler(State(shared): State<Arc<Shared>>, body: String) -> impl IntoResponse {
     let Some(source) = form_value(&body, "filter") else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -74,6 +74,7 @@ async fn search_handler(State(client): State<Arc<Client>>, body: String) -> impl
         }
     };
 
+    let client = shared.client();
     let mut out = Vec::new();
 
     for (index, name) in client.search(&filter).iter().enumerate() {
@@ -107,12 +108,14 @@ fn form_value(body: &str, field: &str) -> Option<String> {
 }
 
 async fn handler(
-    State(client): State<Arc<Client>>,
+    State(shared): State<Arc<Shared>>,
     headers: HeaderMap,
     uri: Uri,
 ) -> impl IntoResponse {
     let decoded_path: Vec<u8> =
         percent_encoding::percent_decode(uri.path().trim_start_matches("/").as_bytes()).collect();
+
+    let client = shared.client();
 
     let Some(located) = client.locate(&decoded_path) else {
         return StatusCode::NOT_FOUND.into_response();
