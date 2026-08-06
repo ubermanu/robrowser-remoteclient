@@ -19,7 +19,18 @@ pub enum Located<'a> {
 impl Client {
     pub fn open(root: &Path) -> io::Result<Client> {
         let ini_path = root.join("DATA.INI");
-        let text = fs::read_to_string(&ini_path)?;
+
+        let text = match fs::read_to_string(&ini_path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                eprintln!(
+                    "warning: {} does not exist, no archives will be served",
+                    ini_path.display()
+                );
+                String::new()
+            }
+            Err(error) => return Err(error),
+        };
 
         let mut in_data = false;
         let mut entries: Vec<(u32, String)> = Vec::new();
