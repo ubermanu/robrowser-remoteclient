@@ -6,6 +6,8 @@ use std::{
     time::Instant,
 };
 
+use encoding_rs::EUC_KR;
+
 pub struct Archive {
     pub version: u32,
     pub real_file_count: u64,
@@ -165,7 +167,15 @@ impl Archive {
         let t = Instant::now();
 
         while let Some(entry) = self.entry_at(at) {
+            if entry.name.iter().any(|&b| b >= 0x80) {
+                index.insert(normalize(to_mojibake(entry.name).as_bytes()), at as u32);
+                if let Some(korean) = decode_cp949(entry.name) {
+                    index.insert(normalize(korean.as_bytes()), at as u32);
+                }
+            }
+
             index.insert(normalize(entry.name), at as u32);
+
             at += entry.name.len() + 1 + self.meta_len();
         }
 
@@ -252,6 +262,20 @@ fn normalize(name: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+fn decode_cp949(name: &[u8]) -> Option<String> {
+    let (decoded, _, had_errors) = EUC_KR.decode(name);
+
+    if had_errors {
+        None
+    } else {
+        Some(decoded.into_owned())
+    }
+}
+
+fn to_mojibake(name: &[u8]) -> String {
+    name.iter().map(|&b| char::from(b)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +283,65 @@ mod tests {
     #[test]
     fn lowercase_and_flips_separators() {
         assert_eq!(normalize(br"DATA\Texture\FOO.BMP"), b"data/texture/foo.bmp");
+    }
+
+    #[test]
+    fn leaves_high_bytes_untouched() {
+        assert_eq!(normalize(&[b'A', 0xC0, 0xAF]), vec![b'a', 0xC0, 0xAF]);
+    }
+
+    #[test]
+    fn is_idempotent() {
+        let once = normalize(br"DATA\Foo.BMP");
+        assert_eq!(normalize(&once), once);
+    }
+
+    #[test]
+    fn lowercases_bytes_that_may_be_cp949_trail_bytes() {
+        assert_eq!(normalize(&[0xB0, 0x41]), vec![0xB0, 0x61]);
+    }
+
+    #[test]
+    fn decodes_cp949_names() {
+        assert_eq!(
+            decode_cp949(b"\xc7\xc1\xb7\xd0\xc5\xd7\xb6\xf3\xc0\xfc\xc1\xfd01.txt").as_deref(),
+            Some("프론테라전집01.txt")
+        );
+    }
+
+    #[test]
+    fn passes_ascii_through() {
+        assert_eq!(
+            decode_cp949(b"data/foo.txt").as_deref(),
+            Some("data/foo.txt")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_cp949() {
+        assert_eq!(decode_cp949(&[0x80]), None);
+    }
+
+    #[test]
+    fn transform_names_to_mojibake() {
+        assert_eq!(
+            to_mojibake(b"\xc7\xc1\xb7\xd0\xc5\xd7\xb6\xf3\xc0\xfc\xc1\xfd01.txt"),
+            "ÇÁ·ÐÅ×¶óÀüÁý01.txt"
+        );
+    }
+
+    #[test]
+    fn reinterprets_bytes_as_latin1() {
+        assert_eq!(
+            to_mojibake(b"\xc7\xc1\xb7\xd0\xc5\xd7\xb6\xf3\xc0\xfc\xc1\xfd01.txt"),
+            "ÇÁ·ÐÅ×¶óÀüÁý01.txt"
+        );
+    }
+
+    #[test]
+    fn mojibake_is_reversible() {
+        let raw: &[u8] = b"data/imf/abyss_chaser_\xb3\xb2.imf";
+        let recovered: Vec<u8> = to_mojibake(raw).chars().map(|c| c as u8).collect();
+        assert_eq!(recovered, raw);
     }
 }

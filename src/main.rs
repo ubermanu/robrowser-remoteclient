@@ -32,5 +32,12 @@ fn main() -> io::Result<()> {
 
     println!("{:?}", archive.lookup(b"data/06guild_r.gat"));
 
+    println!(
+        "{:?}",
+        archive
+            .lookup("data/book/프론테라전집01.txt".as_bytes())
+            .is_some()
+    );
+
     Ok(())
 }
