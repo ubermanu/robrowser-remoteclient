@@ -46,7 +46,7 @@ impl Archive {
     }
 
     pub fn open(path: &Path) -> io::Result<Archive> {
-        let mut file = File::open(&path)?;
+        let mut file = File::open(path)?;
         let metadata = file.metadata()?;
 
         let mut header = [0u8; 46];

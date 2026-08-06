@@ -86,14 +86,13 @@ async fn handler(
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok());
 
-    if let Some(candidate) = if_none_match {
-        if candidate == "*" || Some(candidate) == etag.as_deref() {
+    if let Some(candidate) = if_none_match
+        && (candidate == "*" || Some(candidate) == etag.as_deref()) {
             return builder
                 .status(StatusCode::NOT_MODIFIED)
                 .body(Body::empty())
                 .unwrap();
         }
-    }
 
     match raw {
         Some(bytes) => builder.body(Body::from(bytes.to_vec())).unwrap(),
