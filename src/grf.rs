@@ -7,12 +7,15 @@ use std::{
 };
 
 use encoding_rs::EUC_KR;
+use flate2::bufread::ZlibDecoder;
+use memmap2::Mmap;
 
 pub struct Archive {
     pub version: u32,
     pub real_file_count: u64,
     table: Vec<u8>,
     index: HashMap<Vec<u8>, u32>,
+    mmap: Mmap,
 }
 
 #[derive(Debug)]
@@ -133,7 +136,7 @@ impl Archive {
         let t = Instant::now();
 
         let mut table = Vec::with_capacity(real_size as usize);
-        flate2::read::ZlibDecoder::new(&compressed[..]).read_to_end(&mut table)?;
+        ZlibDecoder::new(&compressed[..]).read_to_end(&mut table)?;
 
         println!("inflated in {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
 
@@ -148,11 +151,16 @@ impl Archive {
             ));
         }
 
+        let mmap = unsafe { Mmap::map(&file)? };
+
+        println!("vsize: {} MB", proc_status_kb("VmSize").unwrap_or(0) / 1024);
+
         let mut archive = Archive {
             table,
             version,
             real_file_count,
             index: HashMap::new(),
+            mmap,
         };
 
         archive.build_index();
@@ -181,7 +189,7 @@ impl Archive {
 
         println!("index built in {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
         println!("index size: {}", index.len());
-        println!("rss: {} MB", rss_kb().unwrap_or(0) / 1024);
+        println!("rss: {} MB", proc_status_kb("VmRSS").unwrap_or(0) / 1024);
 
         self.index = index;
     }
@@ -237,15 +245,71 @@ impl Archive {
 
         count
     }
+
+    pub fn raw(&self, entry: &Entry) -> Option<&[u8]> {
+        let start = usize::try_from(entry.position).ok()? + 46;
+        let len = entry.pack_size as usize;
+        self.mmap.get(start..start.checked_add(len)?)
+    }
+
+    pub fn inflate(&self, entry: &Entry) -> io::Result<Vec<u8>> {
+        if entry.flags != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "{}: entry has flags {}, DES decryption is not implemented",
+                    String::from_utf8_lossy(entry.name),
+                    entry.flags
+                ),
+            ));
+        }
+
+        let slice = self.raw(entry).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: entry data at {} (+{} bytes) lies outside the archive",
+                    String::from_utf8_lossy(entry.name),
+                    entry.position,
+                    entry.pack_size
+                ),
+            )
+        })?;
+
+        let mut data = Vec::with_capacity(entry.real_size as usize);
+        ZlibDecoder::new(slice).read_to_end(&mut data)?;
+
+        if data.len() != entry.real_size as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: inflated to {} bytes, entry header promised {}",
+                    String::from_utf8_lossy(entry.name),
+                    data.len(),
+                    entry.real_size
+                ),
+            ));
+        }
+
+        Ok(data)
+    }
+
+    pub fn read(&self, path: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        if let Some(entry) = self.lookup(path) {
+            self.inflate(&entry).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
 }
 
-fn rss_kb() -> Option<u64> {
+fn proc_status_kb(field: &str) -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     status
         .lines()
-        .find(|line| line.starts_with("VmRSS:"))?
+        .find_map(|line| line.strip_prefix(field)?.strip_prefix(":"))?
         .split_whitespace()
-        .nth(1)?
+        .next()?
         .parse()
         .ok()
 }
