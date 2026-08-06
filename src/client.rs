@@ -101,6 +101,13 @@ impl Client {
         }
     }
 
+    pub fn raw_located(&self, located: &Located) -> Option<&[u8]> {
+        match located {
+            Located::Disk(_) => None,
+            Located::Archive(index, entry) => self.archives[*index].raw_if_plain(entry),
+        }
+    }
+
     pub fn etag(&self, located: &Located) -> Option<String> {
         match located {
             Located::Disk(path) => {
@@ -111,9 +118,9 @@ impl Client {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                Some(format!("\"{mtime:x}-{:x}\"", metadata.len()))
+                Some(format!("{mtime:x}-{:x}", metadata.len()))
             }
-            Located::Archive(index, entry) => Some(format!("\"{index:x}-{}\"", entry.identity())),
+            Located::Archive(index, entry) => Some(format!("{index:x}-{}", entry.identity())),
         }
     }
 }

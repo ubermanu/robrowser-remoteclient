@@ -28,6 +28,9 @@ pub struct Entry<'a> {
     position: u64,
 }
 
+/// Stored compressed only, no DES.
+const FLAG_FILE: u8 = 1;
+
 impl Archive {
     fn meta_len(&self) -> usize {
         if self.version == 0x300 { 21 } else { 17 }
@@ -278,6 +281,13 @@ impl Archive {
         }
 
         Ok(data)
+    }
+
+    pub fn raw_if_plain(&self, entry: &Entry) -> Option<&[u8]> {
+        if entry.flags != FLAG_FILE {
+            return None;
+        }
+        self.raw(entry)
     }
 }
 

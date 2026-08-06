@@ -44,11 +44,39 @@ async fn handler(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let etag = client.etag(&located);
+    let accepts_deflate = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(|token| token.trim())
+                .any(|token| token == "deflate" || token.starts_with("deflate;"))
+        })
+        .unwrap_or(false);
+
+    let raw = if accepts_deflate {
+        client.raw_located(&located)
+    } else {
+        None
+    };
+
+    let etag = client.etag(&located).map(|core| {
+        if raw.is_some() {
+            format!("\"{core}-deflate\"")
+        } else {
+            format!("\"{core}\"")
+        }
+    });
 
     let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, content_type(&decoded_path))
-        .header(header::CACHE_CONTROL, CACHE_POLICY);
+        .header(header::CACHE_CONTROL, CACHE_POLICY)
+        .header(header::VARY, "Accept-Encoding");
+
+    if raw.is_some() {
+        builder = builder.header(header::CONTENT_ENCODING, "deflate");
+    }
 
     if let Some(etag) = &etag {
         builder = builder.header(header::ETAG, etag);
@@ -67,12 +95,15 @@ async fn handler(
         }
     }
 
-    match client.read_located(&located) {
-        Ok(data) => builder.body(Body::from(data)).unwrap(),
-        Err(err) => {
-            eprintln!("{}", err);
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+    match raw {
+        Some(bytes) => builder.body(Body::from(bytes.to_vec())).unwrap(),
+        None => match client.read_located(&located) {
+            Ok(data) => builder.body(Body::from(data)).unwrap(),
+            Err(err) => {
+                eprintln!("{}", err);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        },
     }
 }
 
