@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+mod client;
 mod grf;
 
 #[tokio::main]
@@ -15,11 +16,11 @@ async fn main() -> io::Result<()> {
     let path = std::env::args().nth(1).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: <program> <path-to-grf>",
+            "usage: <program> <path-to-client>",
         )
     })?;
 
-    let archive = Arc::new(grf::Archive::open(Path::new(&path))?);
+    let archive = Arc::new(client::Client::open(Path::new(&path))?);
     let app = Router::new().fallback(handler).with_state(archive);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
     axum::serve(listener, app).await?;
@@ -27,7 +28,7 @@ async fn main() -> io::Result<()> {
     Ok(())
 }
 
-async fn handler(State(archive): State<Arc<grf::Archive>>, uri: Uri) -> impl IntoResponse {
+async fn handler(State(archive): State<Arc<client::Client>>, uri: Uri) -> impl IntoResponse {
     println!("request: {}", uri.path());
 
     let decoded_path: Vec<u8> =

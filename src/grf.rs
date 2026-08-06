@@ -314,7 +314,7 @@ fn proc_status_kb(field: &str) -> Option<u64> {
         .ok()
 }
 
-fn normalize(name: &[u8]) -> Vec<u8> {
+pub(crate) fn normalize(name: &[u8]) -> Vec<u8> {
     name.iter()
         .map(|&b| {
             if b == b'\\' {
