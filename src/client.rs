@@ -8,9 +8,13 @@ use std::{
 use crate::grf::{self, normalize};
 
 pub struct Client {
-    root: PathBuf,
     archives: Vec<grf::Archive>,
     files: HashMap<Vec<u8>, PathBuf>,
+}
+
+pub enum Located<'a> {
+    Disk(&'a Path),
+    Archive(usize, grf::Entry<'a>),
 }
 
 impl Client {
@@ -72,36 +76,45 @@ impl Client {
             t.elapsed().as_secs_f64() * 1000.0
         );
 
-        Ok(Client {
-            root: root.to_path_buf(),
-            archives,
-            files,
-        })
+        Ok(Client { archives, files })
     }
 
-    pub fn read(&self, path: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        if let Some(data) = self.read_disk(path)? {
-            return Ok(Some(data));
+    /// Find where a path lives, without touching the filesystem: loose files
+    /// win over the archives, and lower DATA.INI priority wins among those.
+    pub fn locate(&self, path: &[u8]) -> Option<Located<'_>> {
+        if let Some(full) = self.files.get(normalize(path).as_slice()) {
+            return Some(Located::Disk(full));
         }
 
-        for archive in &self.archives {
-            if let Some(data) = archive.read(path)? {
-                return Ok(Some(data));
+        for (index, archive) in self.archives.iter().enumerate() {
+            if let Some(entry) = archive.lookup(path) {
+                return Some(Located::Archive(index, entry));
             }
         }
 
-        Ok(None)
+        None
     }
 
-    fn read_disk(&self, path: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        let Some(full) = self.files.get(normalize(path).as_slice()) else {
-            return Ok(None);
-        };
+    pub fn read_located(&self, located: &Located) -> io::Result<Vec<u8>> {
+        match located {
+            Located::Disk(path) => fs::read(path),
+            Located::Archive(index, entry) => self.archives[*index].inflate(entry),
+        }
+    }
 
-        match fs::read(full) {
-            Ok(data) => Ok(Some(data)),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err),
+    pub fn etag(&self, located: &Located) -> Option<String> {
+        match located {
+            Located::Disk(path) => {
+                let metadata = fs::metadata(path).ok()?;
+                let mtime = metadata
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                Some(format!("\"{mtime:x}-{:x}\"", metadata.len()))
+            }
+            Located::Archive(index, entry) => Some(format!("\"{index:x}-{}\"", entry.identity())),
         }
     }
 }

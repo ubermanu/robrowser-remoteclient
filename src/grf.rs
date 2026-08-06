@@ -22,6 +22,7 @@ pub struct Archive {
 pub struct Entry<'a> {
     pub name: &'a [u8],
     pack_size: u32,
+    #[allow(dead_code)] // only used by DES-encrypted entries
     length_aligned: u32,
     real_size: u32,
     flags: u8,
@@ -163,14 +164,26 @@ impl Archive {
             mmap,
         };
 
-        archive.build_index();
+        let walked = archive.build_index();
+
+        if walked as u64 != archive.real_file_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: walked {walked} entries, header claims {}",
+                    path.display(),
+                    archive.real_file_count,
+                ),
+            ));
+        }
 
         Ok(archive)
     }
 
-    fn build_index(&mut self) {
+    fn build_index(&mut self) -> usize {
         let mut index = HashMap::with_capacity(self.real_file_count as usize);
         let mut at = 0usize;
+        let mut count = 0usize;
 
         let t = Instant::now();
 
@@ -185,6 +198,7 @@ impl Archive {
             index.insert(normalize(entry.name), at as u32);
 
             at += entry.name.len() + 1 + self.meta_len();
+            count += 1;
         }
 
         println!("index built in {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
@@ -192,6 +206,8 @@ impl Archive {
         println!("rss: {} MB", proc_status_kb("VmRSS").unwrap_or(0) / 1024);
 
         self.index = index;
+
+        count
     }
 
     pub fn lookup(&self, path: &[u8]) -> Option<Entry<'_>> {
@@ -225,25 +241,6 @@ impl Archive {
             flags,
             position,
         })
-    }
-
-    pub fn walk(&self) -> usize {
-        let mut at = 0usize;
-        let mut count = 0usize;
-
-        let t = Instant::now();
-
-        while let Some(entry) = self.entry_at(at) {
-            at += entry.name.len() + 1 + self.meta_len();
-            count += 1;
-        }
-
-        println!(
-            "entries counted in {:.1}ms",
-            t.elapsed().as_secs_f64() * 1000.0
-        );
-
-        count
     }
 
     pub fn raw(&self, entry: &Entry) -> Option<&[u8]> {
@@ -293,13 +290,11 @@ impl Archive {
 
         Ok(data)
     }
+}
 
-    pub fn read(&self, path: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        if let Some(entry) = self.lookup(path) {
-            self.inflate(&entry).map(Some)
-        } else {
-            Ok(None)
-        }
+impl<'a> Entry<'a> {
+    pub fn identity(&self) -> String {
+        format!("{:x}-{:x}", self.position, self.real_size)
     }
 }
 
