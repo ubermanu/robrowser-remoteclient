@@ -30,8 +30,9 @@ line, separated by backslashes as the client spells them.
 curl -X POST http://localhost:8080/ --data-urlencode 'filter=data\\[^\0]+'
 ```
 
-roBrowser needs this for the GRF, map, RSM and STR viewers; leave it off
-otherwise, since a search walks every file table in full.
+> [!TIP]
+> roBrowser needs this for the GRF, map, RSM and STR viewers.
+> Leave it off otherwise, since a search walks every file table in full.
 
 ## Docker
 
