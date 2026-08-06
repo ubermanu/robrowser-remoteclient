@@ -35,14 +35,10 @@ impl Archive {
 
     pub fn open(path: &Path) -> io::Result<Archive> {
         let mut file = File::open(&path)?;
-
         let metadata = file.metadata()?;
-        println!("metadata size: {}", metadata.len());
 
         let mut header = [0u8; 46];
         file.read_exact(&mut header)?;
-
-        println!("{:?}", &header[..16]);
 
         if !header.starts_with(b"Master of Magic") && !header.starts_with(b"Event Horizon") {
             return Err(io::Error::new(
@@ -100,9 +96,6 @@ impl Archive {
             ));
         }
 
-        println!("table_offset: {table_offset}");
-        println!("file_count: {real_file_count}");
-
         file.seek(SeekFrom::Start(
             46 + table_offset + if version == 0x300 { 4 } else { 0 },
         ))?;
@@ -122,9 +115,6 @@ impl Archive {
                 ),
             ));
         }
-
-        println!("pack_size: {}", pack_size);
-        println!("real_size: {}", real_size);
 
         let t = Instant::now();
 
