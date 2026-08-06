@@ -167,7 +167,9 @@ impl Client {
                     .as_secs();
                 Some(format!("{mtime:x}-{:x}", metadata.len()))
             }
-            Located::Archive(index, entry) => Some(format!("{index:x}-{}", entry.identity())),
+            Located::Archive(index, entry) => {
+                Some(format!("{}-{}", self.archives[*index].id, entry.identity()))
+            }
         }
     }
 }

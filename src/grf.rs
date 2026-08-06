@@ -11,6 +11,10 @@ use std::{
 };
 
 pub struct Archive {
+    /// Stable identity of this archive, used to namespace entry etags. Derived
+    /// from the header, the packed file table and the file's mtime and length,
+    /// so it survives DATA.INI reordering but changes on any repack.
+    pub id: String,
     pub version: u32,
     pub real_file_count: u64,
     table: Vec<u8>,
@@ -135,6 +139,34 @@ impl Archive {
 
         println!("read in {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
 
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_secs())
+            .unwrap_or(0);
+
+        let t = Instant::now();
+
+        // Hashing the packed table rather than the inflated one: same coverage,
+        // fewer bytes, and it is already in hand. mtime is folded in because the
+        // table cannot distinguish an entry patched in place at the same offset
+        // and packed length.
+        let id = format!(
+            "{:016x}",
+            fnv1a64(&[
+                &header,
+                &compressed,
+                &mtime.to_le_bytes(),
+                &metadata.len().to_le_bytes(),
+            ])
+        );
+
+        println!(
+            "id {id} computed in {:.1}ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+
         let t = Instant::now();
 
         let mut table = Vec::with_capacity(real_size as usize);
@@ -158,6 +190,7 @@ impl Archive {
         println!("vsize: {} MB", proc_status_kb("VmSize").unwrap_or(0) / 1024);
 
         let mut archive = Archive {
+            id,
             table,
             version,
             real_file_count,
@@ -347,6 +380,22 @@ impl<'a> Entry<'a> {
     pub fn identity(&self) -> String {
         format!("{:x}-{:x}", self.position, self.real_size)
     }
+}
+
+/// FNV-1a over a list of chunks. Not cryptographic, and it does not need to be:
+/// it only has to be cheap and identical across runs, which `std`'s randomly
+/// seeded `DefaultHasher` is not.
+fn fnv1a64(chunks: &[&[u8]]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+
+    for chunk in chunks {
+        for &byte in *chunk {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    hash
 }
 
 fn proc_status_kb(field: &str) -> Option<u64> {
