@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+axum = "0.8.9"
 encoding_rs = "0.8.35"
 flate2 = "1.1.9"
 memmap2 = "0.9.11"
+percent-encoding = "2.3.2"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net"] }
 
 [profile.release]
 debug = true
