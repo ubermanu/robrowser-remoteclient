@@ -23,11 +23,15 @@ struct Args {
     /// Send permissive CORS headers
     #[arg(long, env = "ROBROWSER_REMOTECLIENT_CORS")]
     cors: bool,
+
+    /// Answer file name searches, used by the GRF and map viewers
+    #[arg(long, env = "ROBROWSER_REMOTECLIENT_SEARCH")]
+    search: bool,
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let args = Args::parse();
     let client = Arc::new(client::Client::open(&args.client)?);
-    server::serve(client, args.bind, args.cors).await
+    server::serve(client, args.bind, args.cors, args.search).await
 }

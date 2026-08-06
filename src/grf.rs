@@ -216,6 +216,17 @@ impl Archive {
         self.entry_at(at as usize)
     }
 
+    /// Walk the file table, yielding every entry name as stored.
+    pub fn names(&self) -> impl Iterator<Item = &[u8]> {
+        let mut at = 0usize;
+
+        std::iter::from_fn(move || {
+            let entry = self.entry_at(at)?;
+            at += entry.name.len() + 1 + self.meta_len();
+            Some(entry.name)
+        })
+    }
+
     pub fn entry_at(&self, at: usize) -> Option<Entry<'_>> {
         let rest = self.table.get(at..)?;
         let name_len = rest.iter().position(|&b| b == 0)?;

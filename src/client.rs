@@ -1,12 +1,14 @@
 use crate::grf::{self, normalize};
+use regex::bytes::Regex;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs, io,
     path::{Path, PathBuf},
     time::Instant,
 };
 
 pub struct Client {
+    root: PathBuf,
     archives: Vec<grf::Archive>,
     files: HashMap<Vec<u8>, PathBuf>,
 }
@@ -86,7 +88,11 @@ impl Client {
             t.elapsed().as_secs_f64() * 1000.0
         );
 
-        Ok(Client { archives, files })
+        Ok(Client {
+            root: root.to_path_buf(),
+            archives,
+            files,
+        })
     }
 
     /// Find where a path lives, without touching the filesystem: loose files
@@ -103,6 +109,36 @@ impl Client {
         }
 
         None
+    }
+
+    /// Apply a regex to every known file name, in the backslash-separated form
+    /// the client uses, and return the matched substrings. This is what the GRF
+    /// and map viewers call to list a directory.
+    pub fn search(&self, filter: &Regex) -> Vec<Vec<u8>> {
+        let mut out: BTreeSet<Vec<u8>> = BTreeSet::new();
+
+        for archive in &self.archives {
+            for name in archive.names() {
+                out.extend(filter.find_iter(name).map(|m| m.as_bytes().to_vec()));
+            }
+        }
+
+        for path in self.files.values() {
+            let relative = path
+                .strip_prefix(&self.root)
+                .expect("indexed paths are always under root");
+
+            let name: Vec<u8> = relative
+                .as_os_str()
+                .as_encoded_bytes()
+                .iter()
+                .map(|&b| if b == b'/' { b'\\' } else { b })
+                .collect();
+
+            out.extend(filter.find_iter(&name).map(|m| m.as_bytes().to_vec()));
+        }
+
+        out.into_iter().collect()
     }
 
     pub fn read_located(&self, located: &Located) -> io::Result<Vec<u8>> {

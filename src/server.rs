@@ -5,21 +5,40 @@ use axum::{
     extract::State,
     http::{HeaderMap, HeaderName, Method, Response, StatusCode, Uri, header},
     response::IntoResponse,
+    routing::post,
 };
+use regex::bytes::RegexBuilder;
 use std::{ffi::OsStr, io, net::SocketAddr, os::unix::ffi::OsStrExt, path::Path, sync::Arc};
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
 const CACHE_POLICY: &str = "public, max-age=3600";
 
-pub async fn serve(client: Arc<Client>, bind: SocketAddr, cors: bool) -> io::Result<()> {
-    let mut app = Router::new().fallback(handler).with_state(client);
+pub async fn serve(
+    client: Arc<Client>,
+    bind: SocketAddr,
+    cors: bool,
+    search: bool,
+) -> io::Result<()> {
+    let mut router = Router::new();
+
+    if search {
+        router = router.route("/", post(search_handler).fallback(handler));
+    }
+
+    let mut app = router.fallback(handler).with_state(client);
 
     if cors {
+        let mut methods = vec![Method::GET, Method::HEAD];
+
+        if search {
+            methods.push(Method::POST);
+        }
+
         app = app.layer(
             CorsLayer::new()
                 .allow_origin(Any)
-                .allow_methods([Method::GET, Method::HEAD])
+                .allow_methods(methods)
                 .allow_headers([HeaderName::from_static("x-application")]),
         );
     }
@@ -30,6 +49,61 @@ pub async fn serve(client: Arc<Client>, bind: SocketAddr, cors: bool) -> io::Res
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
         .await
+}
+
+/// `POST /` with a `filter=<regex>` body: run the regex over every file name
+/// and answer with the matches, one per line.
+async fn search_handler(State(client): State<Arc<Client>>, body: String) -> impl IntoResponse {
+    let Some(source) = form_value(&body, "filter") else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+
+    // `\0` is how the viewers spell the file table separator, but the regex
+    // crate only knows the `\x00` form.
+    let source = source.replace("\\0", "\\x00");
+
+    let filter = match RegexBuilder::new(&source)
+        .case_insensitive(true)
+        .unicode(false)
+        .build()
+    {
+        Ok(filter) => filter,
+        Err(err) => {
+            eprintln!("{}", err);
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    };
+
+    let mut out = Vec::new();
+
+    for (index, name) in client.search(&filter).iter().enumerate() {
+        if index > 0 {
+            out.push(b'\n');
+        }
+        out.extend_from_slice(name);
+    }
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/plain")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(out))
+        .unwrap()
+}
+
+/// Pull a field out of an `application/x-www-form-urlencoded` body. `+` is left
+/// alone: the client encodes with `encodeURIComponent`, which spares it, and a
+/// regex is far more likely to want a quantifier than a space.
+fn form_value(body: &str, field: &str) -> Option<String> {
+    let raw = body
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find_map(|(key, value)| (key == field).then_some(value))?;
+
+    Some(
+        percent_encoding::percent_decode_str(raw)
+            .decode_utf8_lossy()
+            .into_owned(),
+    )
 }
 
 async fn handler(
@@ -87,12 +161,13 @@ async fn handler(
         .and_then(|value| value.to_str().ok());
 
     if let Some(candidate) = if_none_match
-        && (candidate == "*" || Some(candidate) == etag.as_deref()) {
-            return builder
-                .status(StatusCode::NOT_MODIFIED)
-                .body(Body::empty())
-                .unwrap();
-        }
+        && (candidate == "*" || Some(candidate) == etag.as_deref())
+    {
+        return builder
+            .status(StatusCode::NOT_MODIFIED)
+            .body(Body::empty())
+            .unwrap();
+    }
 
     match raw {
         Some(bytes) => builder.body(Body::from(bytes.to_vec())).unwrap(),

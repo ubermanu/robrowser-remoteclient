@@ -18,6 +18,20 @@ robrowser-remoteclient /path/to/client
 | `<client>`    | —                               | required       |
 | `--bind ADDR` | `ROBROWSER_REMOTECLIENT_BIND`   | `0.0.0.0:8080` |
 | `--cors`      | `ROBROWSER_REMOTECLIENT_CORS`   | off            |
+| `--search`    | `ROBROWSER_REMOTECLIENT_SEARCH` | off            |
+
+## Search
+
+With `--search`, `POST /` answers file name searches. The body is
+`filter=<regex>`, form-encoded, and the reply is the matched names, one per
+line, separated by backslashes as the client spells them.
+
+```sh
+curl -X POST http://localhost:8080/ --data-urlencode 'filter=data\\[^\0]+'
+```
+
+roBrowser needs this for the GRF, map, RSM and STR viewers; leave it off
+otherwise, since a search walks every file table in full.
 
 ## Docker
 
