@@ -1,3 +1,6 @@
+use encoding_rs::EUC_KR;
+use flate2::bufread::ZlibDecoder;
+use memmap2::Mmap;
 use std::{
     collections::HashMap,
     fs::File,
@@ -5,10 +8,6 @@ use std::{
     path::Path,
     time::Instant,
 };
-
-use encoding_rs::EUC_KR;
-use flate2::bufread::ZlibDecoder;
-use memmap2::Mmap;
 
 pub struct Archive {
     pub version: u32,

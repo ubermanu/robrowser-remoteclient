@@ -1,6 +1,5 @@
-use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
-
 use clap::Parser;
+use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
 
 mod client;
 mod grf;
@@ -19,11 +18,15 @@ struct Args {
         default_value = "0.0.0.0:8080"
     )]
     bind: SocketAddr,
+
+    /// Send permissive CORS headers
+    #[arg(long, env = "ROBROWSER_REMOTECLIENT_CORS")]
+    cors: bool,
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let args = Args::parse();
     let client = Arc::new(client::Client::open(&args.client)?);
-    server::serve(client, args.bind).await
+    server::serve(client, args.bind, args.cors).await
 }

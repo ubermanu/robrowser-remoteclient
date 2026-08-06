@@ -1,20 +1,29 @@
-use std::{ffi::OsStr, io, net::SocketAddr, os::unix::ffi::OsStrExt, path::Path, sync::Arc};
-
+use crate::client::Client;
 use axum::{
     Router,
     body::Body,
     extract::State,
-    http::{HeaderMap, Response, StatusCode, Uri, header},
+    http::{HeaderMap, HeaderName, Method, Response, StatusCode, Uri, header},
     response::IntoResponse,
 };
+use std::{ffi::OsStr, io, net::SocketAddr, os::unix::ffi::OsStrExt, path::Path, sync::Arc};
 use tokio::net::TcpListener;
-
-use crate::client::Client;
+use tower_http::cors::{Any, CorsLayer};
 
 const CACHE_POLICY: &str = "public, max-age=3600";
 
-pub async fn serve(client: Arc<Client>, bind: SocketAddr) -> io::Result<()> {
-    let app = Router::new().fallback(handler).with_state(client);
+pub async fn serve(client: Arc<Client>, bind: SocketAddr, cors: bool) -> io::Result<()> {
+    let mut app = Router::new().fallback(handler).with_state(client);
+
+    if cors {
+        app = app.layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::HEAD])
+                .allow_headers([HeaderName::from_static("x-application")]),
+        );
+    }
+
     let listener = TcpListener::bind(bind).await?;
     println!("listening on {}", listener.local_addr()?);
 

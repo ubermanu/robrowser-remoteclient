@@ -1,11 +1,10 @@
+use crate::grf::{self, normalize};
 use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
     time::Instant,
 };
-
-use crate::grf::{self, normalize};
 
 pub struct Client {
     archives: Vec<grf::Archive>,
