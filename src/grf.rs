@@ -1,3 +1,4 @@
+use crate::des;
 use encoding_rs::EUC_KR;
 use flate2::bufread::ZlibDecoder;
 use memmap2::Mmap;
@@ -21,7 +22,6 @@ pub struct Archive {
 pub struct Entry<'a> {
     pub name: &'a [u8],
     pack_size: u32,
-    #[allow(dead_code)] // only used by DES-encrypted entries
     length_aligned: u32,
     real_size: u32,
     flags: u8,
@@ -30,6 +30,15 @@ pub struct Entry<'a> {
 
 /// Stored compressed only, no DES.
 const FLAG_FILE: u8 = 1;
+
+/// DES over the first 20 blocks only.
+const FLAG_ENCRYPT_HEADER: u8 = 2;
+
+/// DES over the header blocks, then one block in every cycle.
+const FLAG_ENCRYPT_MIXED: u8 = 3;
+
+/// Same as [`FLAG_ENCRYPT_MIXED`], seen on older archives.
+const FLAG_ENCRYPT_MIXED_ALT: u8 = 5;
 
 impl Archive {
     fn meta_len(&self) -> usize {
@@ -236,34 +245,66 @@ impl Archive {
     }
 
     pub fn raw(&self, entry: &Entry) -> Option<&[u8]> {
+        self.slice(entry, entry.pack_size)
+    }
+
+    fn slice(&self, entry: &Entry, len: u32) -> Option<&[u8]> {
         let start = usize::try_from(entry.position).ok()? + 46;
-        let len = entry.pack_size as usize;
-        self.mmap.get(start..start.checked_add(len)?)
+        self.mmap.get(start..start.checked_add(len as usize)?)
+    }
+
+    /// Undo the DES pass an encrypted entry went through, leaving plain
+    /// deflate data trimmed back to its packed length.
+    fn decrypt(&self, entry: &Entry) -> io::Result<Vec<u8>> {
+        // Encrypted entries are stored padded out to a whole number of blocks.
+        let mut data = self
+            .slice(entry, entry.length_aligned)
+            .ok_or_else(|| self.out_of_bounds(entry, entry.length_aligned))?
+            .to_vec();
+
+        match entry.flags {
+            FLAG_ENCRYPT_HEADER => des::decrypt_header(&mut data),
+            FLAG_ENCRYPT_MIXED | FLAG_ENCRYPT_MIXED_ALT => {
+                let (cycle, is_data_crypted) = des::cycle(entry.name, entry.pack_size);
+                des::decrypt_mixed(&mut data, cycle, is_data_crypted);
+            }
+            flags => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "{}: entry has flags {flags}, which needs a custom decryption key",
+                        String::from_utf8_lossy(entry.name),
+                    ),
+                ));
+            }
+        }
+
+        data.truncate(entry.pack_size as usize);
+
+        Ok(data)
+    }
+
+    fn out_of_bounds(&self, entry: &Entry, len: u32) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: entry data at {} (+{len} bytes) lies outside the archive",
+                String::from_utf8_lossy(entry.name),
+                entry.position,
+            ),
+        )
     }
 
     pub fn inflate(&self, entry: &Entry) -> io::Result<Vec<u8>> {
-        if entry.flags != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "{}: entry has flags {}, DES decryption is not implemented",
-                    String::from_utf8_lossy(entry.name),
-                    entry.flags
-                ),
-            ));
-        }
+        let decrypted;
 
-        let slice = self.raw(entry).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{}: entry data at {} (+{} bytes) lies outside the archive",
-                    String::from_utf8_lossy(entry.name),
-                    entry.position,
-                    entry.pack_size
-                ),
-            )
-        })?;
+        let slice = if entry.flags == FLAG_FILE {
+            self.raw(entry)
+                .ok_or_else(|| self.out_of_bounds(entry, entry.pack_size))?
+        } else {
+            decrypted = self.decrypt(entry)?;
+            &decrypted[..]
+        };
 
         let mut data = Vec::with_capacity(entry.real_size as usize);
         ZlibDecoder::new(slice).read_to_end(&mut data)?;

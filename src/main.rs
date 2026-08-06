@@ -2,6 +2,7 @@ use clap::Parser;
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
 
 mod client;
+mod des;
 mod grf;
 mod server;
 
