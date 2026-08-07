@@ -12,7 +12,7 @@ use std::{ffi::OsStr, io, net::SocketAddr, os::unix::ffi::OsStrExt, path::Path, 
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
-const CACHE_POLICY: &str = "public, max-age=3600";
+const CACHE_POLICY: &str = "public, max-age=3600, stale-while-revalidate=86400";
 
 pub async fn serve(
     client: Arc<Client>,
