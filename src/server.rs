@@ -130,7 +130,7 @@ async fn handler(
         .unwrap_or(false);
 
     let raw = if accepts_deflate {
-        client.raw_located(&located)
+        client.deflated_located(&located)
     } else {
         None
     };
@@ -170,7 +170,7 @@ async fn handler(
     }
 
     match raw {
-        Some(bytes) => builder.body(Body::from(bytes.to_vec())).unwrap(),
+        Some(bytes) => builder.body(Body::from(bytes.as_slice().to_vec())).unwrap(),
         None => match client.read_located(&located) {
             Ok(data) => builder.body(Body::from(data)).unwrap(),
             Err(err) => {

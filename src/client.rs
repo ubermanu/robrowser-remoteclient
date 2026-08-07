@@ -1,21 +1,72 @@
 use crate::grf::{self, normalize};
+use flate2::{Compression, write::ZlibEncoder};
 use regex::bytes::Regex;
 use std::{
     collections::{BTreeSet, HashMap},
+    ffi::OsStr,
     fs, io,
+    io::Write,
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Instant,
 };
+
+/// Loose files are compressed once and kept, so the expensive setting is the
+/// right one: level 9 costs ~25x the CPU of level 1 for ~30% fewer bytes, which
+/// only pays off when the result is reused.
+const DISK_COMPRESSION: Compression = Compression::new(9);
+
+/// Below this, framing overhead eats the gain.
+const MIN_COMPRESSED_SIZE: u64 = 256;
+
+/// Cap on the deflated copies held in memory. Files past it are left
+/// uncompressed rather than evicting earlier ones: the table is built once at
+/// startup over a mostly static client, so there is nothing to age out.
+const CACHE_BUDGET: usize = 256 * 1024 * 1024;
+
+/// Already-compressed payloads, where deflate spends CPU to gain nothing.
+const INCOMPRESSIBLE: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "webp", "mp3", "ogg", "wav", "zip", "gz", "grf", "rgz",
+];
 
 pub struct Client {
     root: PathBuf,
     archives: Vec<grf::Archive>,
     files: HashMap<Vec<u8>, PathBuf>,
+    deflated: RwLock<DeflateCache>,
+}
+
+/// A loose file plus the mtime and length it had when it was compressed.
+type CacheKey = (PathBuf, u64, u64);
+
+#[derive(Default)]
+struct DeflateCache {
+    entries: HashMap<CacheKey, Arc<Vec<u8>>>,
+    bytes: usize,
 }
 
 pub enum Located<'a> {
     Disk(&'a Path),
     Archive(usize, grf::Entry<'a>),
+}
+
+/// Deflated bytes ready to go out, either the archive's own stored stream or a
+/// cached copy of a loose file.
+pub enum Deflated<'a> {
+    Stored(&'a [u8]),
+    Cached(Arc<Vec<u8>>),
+}
+
+impl Deflated<'_> {
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Deflated::Stored(bytes) => bytes,
+            Deflated::Cached(bytes) => bytes,
+        }
+    }
 }
 
 impl Client {
@@ -92,6 +143,7 @@ impl Client {
             root: root.to_path_buf(),
             archives,
             files,
+            deflated: RwLock::new(DeflateCache::default()),
         })
     }
 
@@ -148,10 +200,118 @@ impl Client {
         }
     }
 
-    pub fn raw_located(&self, located: &Located) -> Option<&[u8]> {
+    /// Deflated bytes for a located file, or `None` to send it as it is. Both
+    /// arms are lookups, never work: archive entries hand over the stream the
+    /// GRF already stores, and loose files answer from the table
+    /// `compress_files` filled at startup. With `--no-compress` that table stays
+    /// empty and loose files go out as they are.
+    pub fn deflated_located(&self, located: &Located) -> Option<Deflated<'_>> {
         match located {
-            Located::Disk(_) => None,
-            Located::Archive(index, entry) => self.archives[*index].raw_if_plain(entry),
+            Located::Archive(index, entry) => self.archives[*index]
+                .raw_if_plain(entry)
+                .map(Deflated::Stored),
+            Located::Disk(path) => {
+                let key = cache_key(path)?;
+
+                self.deflated
+                    .read()
+                    .expect("deflate cache is never poisoned")
+                    .entries
+                    .get(&key)
+                    .map(|hit| Deflated::Cached(Arc::clone(hit)))
+            }
+        }
+    }
+
+    /// Compress every loose file under the served directories, with the same
+    /// zlib stream a GRF stores, and keep the results in memory.
+    ///
+    /// Archives are left alone on purpose: their entries are already deflated at
+    /// full strength -- recompressing them at level 9 measures out at +1% on a
+    /// `.gnd` and -1% on a `.gat` -- so the only files with something to gain are
+    /// the loose ones, which sit on disk uncompressed.
+    ///
+    /// Runs to completion before the server starts listening, so a request never
+    /// races a half-filled table.
+    pub fn compress_files(&self) {
+        let candidates: Vec<PathBuf> = self
+            .files
+            .values()
+            .filter(|path| is_compressible(path))
+            .cloned()
+            .collect();
+
+        let total = candidates.len();
+
+        if total == 0 {
+            return;
+        }
+
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(2).max(1))
+            .unwrap_or(1);
+
+        println!("compressing {total} disk file(s) on {threads} thread(s)");
+
+        let queue = Mutex::new(candidates);
+        let skipped = AtomicUsize::new(0);
+        let over_budget = AtomicUsize::new(0);
+        let t = Instant::now();
+
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    loop {
+                        let Some(path) = queue
+                            .lock()
+                            .expect("compression queue is never poisoned")
+                            .pop()
+                        else {
+                            break;
+                        };
+
+                        let Some((key, deflated)) = deflate_file(&path) else {
+                            skipped.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        };
+
+                        let mut cache = self
+                            .deflated
+                            .write()
+                            .expect("deflate cache is never poisoned");
+
+                        if cache.bytes + deflated.len() > CACHE_BUDGET {
+                            over_budget.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+
+                        cache.bytes += deflated.len();
+                        cache.entries.insert(key, deflated);
+                    }
+                });
+            }
+        });
+
+        let cache = self
+            .deflated
+            .read()
+            .expect("deflate cache is never poisoned");
+
+        println!(
+            "compressed {} of {total} file(s) into {:.1} MB in {:.1}s ({} not worth it)",
+            cache.entries.len(),
+            cache.bytes as f64 / 1048576.0,
+            t.elapsed().as_secs_f64(),
+            skipped.load(Ordering::Relaxed),
+        );
+
+        let dropped = over_budget.load(Ordering::Relaxed);
+
+        if dropped > 0 {
+            println!(
+                "warning: {dropped} file(s) left uncompressed, the {} MB budget was reached",
+                CACHE_BUDGET / 1048576
+            );
         }
     }
 
@@ -172,6 +332,54 @@ impl Client {
             }
         }
     }
+}
+
+/// Cache key for a loose file. The mtime and length make it self-invalidating:
+/// a file edited while the server runs no longer matches its entry, so it falls
+/// back to being served uncompressed instead of serving the stale copy.
+fn cache_key(path: &Path) -> Option<CacheKey> {
+    let metadata = fs::metadata(path).ok()?;
+    let mtime = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    Some((path.to_path_buf(), mtime, metadata.len()))
+}
+
+/// Whether a loose file is worth offering to the compressor at all: not an
+/// already-packed format, and big enough for the framing to pay for itself.
+fn is_compressible(path: &Path) -> bool {
+    let packed = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|extension| INCOMPRESSIBLE.contains(&extension.as_str()));
+
+    if packed {
+        return false;
+    }
+
+    fs::metadata(path).is_ok_and(|metadata| metadata.len() >= MIN_COMPRESSED_SIZE)
+}
+
+/// Compress one loose file. `None` if it cannot be read or barely shrank, in
+/// which case sending it as it is costs less than the round trip through zlib.
+fn deflate_file(path: &Path) -> Option<(CacheKey, Arc<Vec<u8>>)> {
+    let key = cache_key(path)?;
+    let plain = fs::read(path).ok()?;
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), DISK_COMPRESSION);
+    encoder.write_all(&plain).ok()?;
+    let deflated = encoder.finish().ok()?;
+
+    if deflated.len() * 10 > plain.len() * 9 {
+        return None;
+    }
+
+    Some((key, Arc::new(deflated)))
 }
 
 fn index_dir(dir: &Path, root: &Path, files: &mut HashMap<Vec<u8>, PathBuf>) -> io::Result<()> {
