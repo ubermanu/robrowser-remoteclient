@@ -1,4 +1,5 @@
 use crate::des;
+use bytes::Bytes;
 use encoding_rs::EUC_KR;
 use flate2::bufread::ZlibDecoder;
 use memmap2::Mmap;
@@ -7,6 +8,7 @@ use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     path::Path,
+    sync::Arc,
     time::Instant,
 };
 
@@ -19,7 +21,22 @@ pub struct Archive {
     pub real_file_count: u64,
     table: Vec<u8>,
     index: HashMap<Vec<u8>, u32>,
-    mmap: Mmap,
+    mmap: Arc<Mmap>,
+}
+
+/// Owner for a [`Bytes`] view into the mapping: it keeps the map alive for as
+/// long as the response body is still being written out, so an entry can be
+/// handed to the socket as a refcount bump instead of a copy.
+struct MappedRange {
+    mmap: Arc<Mmap>,
+    start: usize,
+    len: usize,
+}
+
+impl AsRef<[u8]> for MappedRange {
+    fn as_ref(&self) -> &[u8] {
+        &self.mmap[self.start..self.start + self.len]
+    }
 }
 
 #[derive(Debug)]
@@ -195,7 +212,7 @@ impl Archive {
             version,
             real_file_count,
             index: HashMap::new(),
-            mmap,
+            mmap: Arc::new(mmap),
         };
 
         let walked = archive.build_index();
@@ -368,11 +385,27 @@ impl Archive {
         Ok(data)
     }
 
-    pub fn raw_if_plain(&self, entry: &Entry) -> Option<&[u8]> {
+    /// The entry's stored deflate stream, as a handle onto the mapping rather
+    /// than a copy of it. Only for entries the GRF holds in plain deflate: an
+    /// encrypted one has to go through [`Self::decrypt`] first, so there is no
+    /// mapped range to hand out.
+    pub fn raw_if_plain(&self, entry: &Entry) -> Option<Bytes> {
         if entry.flags != FLAG_FILE {
             return None;
         }
-        self.raw(entry)
+
+        let start = usize::try_from(entry.position).ok()? + 46;
+        let len = entry.pack_size as usize;
+
+        // Bounds-check against the mapping before handing out the range, so
+        // `MappedRange` can index it without panicking later.
+        self.mmap.get(start..start.checked_add(len)?)?;
+
+        Some(Bytes::from_owner(MappedRange {
+            mmap: Arc::clone(&self.mmap),
+            start,
+            len,
+        }))
     }
 }
 

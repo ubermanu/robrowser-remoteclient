@@ -170,7 +170,7 @@ async fn handler(
     }
 
     match raw {
-        Some(bytes) => builder.body(Body::from(bytes.as_slice().to_vec())).unwrap(),
+        Some(bytes) => builder.body(Body::from(bytes)).unwrap(),
         None => match client.read_located(&located) {
             Ok(data) => builder.body(Body::from(data)).unwrap(),
             Err(err) => {

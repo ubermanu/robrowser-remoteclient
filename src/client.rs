@@ -1,4 +1,5 @@
 use crate::grf::{self, normalize};
+use bytes::Bytes;
 use flate2::{Compression, write::ZlibEncoder};
 use regex::bytes::Regex;
 use std::{
@@ -8,7 +9,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
+        Mutex, RwLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::Instant,
@@ -44,29 +45,13 @@ type CacheKey = (PathBuf, u64, u64);
 
 #[derive(Default)]
 struct DeflateCache {
-    entries: HashMap<CacheKey, Arc<Vec<u8>>>,
+    entries: HashMap<CacheKey, Bytes>,
     bytes: usize,
 }
 
 pub enum Located<'a> {
     Disk(&'a Path),
     Archive(usize, grf::Entry<'a>),
-}
-
-/// Deflated bytes ready to go out, either the archive's own stored stream or a
-/// cached copy of a loose file.
-pub enum Deflated<'a> {
-    Stored(&'a [u8]),
-    Cached(Arc<Vec<u8>>),
-}
-
-impl Deflated<'_> {
-    pub fn as_slice(&self) -> &[u8] {
-        match self {
-            Deflated::Stored(bytes) => bytes,
-            Deflated::Cached(bytes) => bytes,
-        }
-    }
 }
 
 impl Client {
@@ -205,11 +190,12 @@ impl Client {
     /// GRF already stores, and loose files answer from the table
     /// `compress_files` filled at startup. A file the table missed goes out as
     /// it is.
-    pub fn deflated_located(&self, located: &Located) -> Option<Deflated<'_>> {
+    ///
+    /// The result is a [`Bytes`] on purpose: it is what the response body wants,
+    /// so a hit costs a refcount bump rather than a copy of the payload.
+    pub fn deflated_located(&self, located: &Located) -> Option<Bytes> {
         match located {
-            Located::Archive(index, entry) => self.archives[*index]
-                .raw_if_plain(entry)
-                .map(Deflated::Stored),
+            Located::Archive(index, entry) => self.archives[*index].raw_if_plain(entry),
             Located::Disk(path) => {
                 let key = cache_key(path)?;
 
@@ -218,7 +204,7 @@ impl Client {
                     .expect("deflate cache is never poisoned")
                     .entries
                     .get(&key)
-                    .map(|hit| Deflated::Cached(Arc::clone(hit)))
+                    .cloned()
             }
         }
     }
@@ -367,7 +353,7 @@ fn is_compressible(path: &Path) -> bool {
 
 /// Compress one loose file. `None` if it cannot be read or barely shrank, in
 /// which case sending it as it is costs less than the round trip through zlib.
-fn deflate_file(path: &Path) -> Option<(CacheKey, Arc<Vec<u8>>)> {
+fn deflate_file(path: &Path) -> Option<(CacheKey, Bytes)> {
     let key = cache_key(path)?;
     let plain = fs::read(path).ok()?;
 
@@ -379,7 +365,7 @@ fn deflate_file(path: &Path) -> Option<(CacheKey, Arc<Vec<u8>>)> {
         return None;
     }
 
-    Some((key, Arc::new(deflated)))
+    Some((key, Bytes::from(deflated)))
 }
 
 fn index_dir(dir: &Path, root: &Path, files: &mut HashMap<Vec<u8>, PathBuf>) -> io::Result<()> {
