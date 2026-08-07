@@ -203,8 +203,8 @@ impl Client {
     /// Deflated bytes for a located file, or `None` to send it as it is. Both
     /// arms are lookups, never work: archive entries hand over the stream the
     /// GRF already stores, and loose files answer from the table
-    /// `compress_files` filled at startup. With `--no-compress` that table stays
-    /// empty and loose files go out as they are.
+    /// `compress_files` filled at startup. A file the table missed goes out as
+    /// it is.
     pub fn deflated_located(&self, located: &Located) -> Option<Deflated<'_>> {
         match located {
             Located::Archive(index, entry) => self.archives[*index]
