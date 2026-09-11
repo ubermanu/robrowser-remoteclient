@@ -85,8 +85,8 @@ pub fn cycle(name: &[u8], pack_size: u32) -> (usize, bool) {
 
 /// Decrypt the first 20 blocks, all the packer touched.
 pub fn decrypt_header(data: &mut [u8]) {
-    for block in data.chunks_exact_mut(BLOCK_SIZE).take(20) {
-        decrypt_block(block.try_into().unwrap());
+    for block in data.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().take(20) {
+        decrypt_block(block);
     }
 }
 
@@ -107,9 +107,7 @@ pub fn decrypt_mixed(data: &mut [u8], mut cycle: usize, is_data_crypted: bool) {
 
     let mut count = 0;
 
-    for (i, block) in data.chunks_exact_mut(BLOCK_SIZE).enumerate() {
-        let block: &mut [u8; BLOCK_SIZE] = block.try_into().unwrap();
-
+    for (i, block) in data.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
         if i < 20 || (!is_data_crypted && i % cycle == 0) {
             decrypt_block(block);
         } else {
